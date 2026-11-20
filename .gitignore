@@ -11,3 +11,9 @@ Desktop.ini
 
 # Log files
 *.log
+
+# Android / Gradle
+.gradle/
+local.properties
+**/build/
+*.apk
