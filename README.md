@@ -17,22 +17,28 @@
 └── 相关文档/
 ```
 
-Windows 脚本保留固定参数的基础广播测试流程。Android 应用提供可编辑的 iBeacon 参数、启动时自动广播和每日时段计划。Android 默认使用独立测试 UUID，不复用 Windows 脚本中的 UUID。
+Windows 脚本保留固定参数的基础广播测试流程。Android 应用提供可编辑的 iBeacon 参数、启动时自动广播和每日时段计划。Android 使用通用示例 UUID 和独立的 Major、Minor 测试值。
 
 ## Android 应用
+
+[下载最新 Android 安装包](https://github.com/FigureQAQ/wqtsg-pc-ble-signin/releases/latest)
 
 应用首次默认使用以下本地测试参数：
 
 | 参数 | 默认值 |
 | --- | --- |
-| UUID | `7E57D004-2B97-4E7A-B45F-5387367791CD` |
+| UUID | `FDA50693-A4E2-4FB1-AFCF-C6EB07647825` |
 | Major | `1` |
 | Minor | `1` |
 | Tx Power | `-59 dBm` |
 
-参数可在应用中编辑，并在广播成功后保存。未启用每日计划时，打开应用会自动开始广播，离开应用后广播暂停。
+UUID、Major、Minor 和 Tx Power 编辑为有效值后会自动保存，重新打开应用会恢复这些值。手动广播时，停止后点“开始广播”即可使用已保存的参数。未启用每日计划时，打开应用会自动开始广播，离开应用后广播暂停。
 
 开启“每日定时广播”后，可设置每日开始和结束时间。默认时间为 09:00 至 18:00，支持跨午夜时段。计划在后台运行，并在设备重启后恢复。关闭每日计划后，打开应用会直接广播。
+
+### Android 真机截图
+
+![Beacon Inspector 在平板上广播测试信标的真机截图](assets/android-screenshot.png)
 
 ### 构建和安装
 

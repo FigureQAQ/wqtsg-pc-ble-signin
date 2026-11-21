@@ -18,7 +18,9 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -43,7 +45,9 @@ public class MainActivity extends Activity {
     static final String KEY_DAILY_ENABLED = "dailyEnabled";
     static final String KEY_START_MINUTE = "startMinute";
     static final String KEY_END_MINUTE = "endMinute";
-    static final String DEFAULT_UUID = "7E57D004-2B97-4E7A-B45F-5387367791CD";
+    static final String DEFAULT_UUID = "FDA50693-A4E2-4FB1-AFCF-C6EB07647825";
+    private static final String PREVIOUS_DEFAULT_UUID = "7E57D004-2B97-4E7A-B45F-5387367791CD";
+    private static final String KEY_DEFAULT_UUID_MIGRATED = "defaultUuidMigrated";
     static final int DEFAULT_MAJOR = 1;
     static final int DEFAULT_MINOR = 1;
     static final int DEFAULT_TX_POWER = -59;
@@ -53,14 +57,10 @@ public class MainActivity extends Activity {
     private static final int REQUEST_PERMISSIONS = 41;
     private static final int REQUEST_EXACT_ALARM = 42;
 
-    private BluetoothLeAdvertiser advertiser;
-    private boolean advertising;
-    private boolean broadcastStarting;
-    private boolean broadcastRequested;
+    private DirectBroadcast directBroadcast;
     private boolean permissionRequestPending;
     private boolean exactAlarmSettingsPending;
     private boolean autoStart = true;
-    private BeaconParams pendingParams;
     private TextView statusText;
     private Button toggleButton;
     private Button startTimeButton;
@@ -73,44 +73,26 @@ public class MainActivity extends Activity {
     private int startMinute = DEFAULT_START_MINUTE;
     private int endMinute = DEFAULT_END_MINUTE;
 
-    private final AdvertiseCallback advertiseCallback = new AdvertiseCallback() {
-        @Override
-        public void onStartSuccess(AdvertiseSettings settingsInEffect) {
-            runOnUiThread(() -> {
-                if (!broadcastRequested) {
-                    if (advertiser != null) advertiser.stopAdvertising(advertiseCallback);
-                    return;
-                }
-                broadcastStarting = false;
-                setDirectStatus(true, "正在广播测试信标");
-                saveParams(pendingParams);
-            });
-        }
-
-        @Override
-        public void onStartFailure(int errorCode) {
-            runOnUiThread(() -> {
-                broadcastRequested = false;
-                broadcastStarting = false;
-                setDirectStatus(false, "广播启动失败 · 错误 " + errorCode);
-                Toast.makeText(MainActivity.this, "设备未能启动 BLE 广播", Toast.LENGTH_SHORT).show();
-            });
-        }
-    };
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().setStatusBarColor(0xFFF4F7F6);
-        getWindow().setNavigationBarColor(0xFFF4F7F6);
-        getWindow().getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
-        loadSettings();
+        int systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            getWindow().setNavigationBarColor(0xFFF4F7F6);
+            systemUiVisibility |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        }
+        getWindow().getDecorView().setSystemUiVisibility(systemUiVisibility);
         setContentView(createContent());
         requestPermissionAndStart();
     }
 
     private View createContent() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        BeaconParams savedParams = BeaconParams.from(prefs);
+        startMinute = prefs.getInt(KEY_START_MINUTE, DEFAULT_START_MINUTE);
+        endMinute = prefs.getInt(KEY_END_MINUTE, DEFAULT_END_MINUTE);
+
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(0xFFF4F7F6);
@@ -140,7 +122,7 @@ public class MainActivity extends Activity {
         statusText = text("正在准备广播", 14, 0xFF355450, true);
         status.addView(statusText, new LinearLayout.LayoutParams(0, -2, 1));
 
-        uuidInput = addInput(page, "UUID", DEFAULT_UUID,
+        uuidInput = addInput(page, "UUID", savedParams.uuid,
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
 
         LinearLayout numberRow = new LinearLayout(this);
@@ -148,9 +130,9 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams numberRowParams = params(-1, -2);
         numberRowParams.topMargin = dp(12);
         page.addView(numberRow, numberRowParams);
-        majorInput = addInput(numberRow, "Major", String.valueOf(DEFAULT_MAJOR), InputType.TYPE_CLASS_NUMBER);
-        minorInput = addInput(numberRow, "Minor", String.valueOf(DEFAULT_MINOR), InputType.TYPE_CLASS_NUMBER);
-        txPowerInput = addInput(page, "Tx Power (dBm)", String.valueOf(DEFAULT_TX_POWER),
+        majorInput = addInput(numberRow, "Major", String.valueOf(savedParams.major), InputType.TYPE_CLASS_NUMBER);
+        minorInput = addInput(numberRow, "Minor", String.valueOf(savedParams.minor), InputType.TYPE_CLASS_NUMBER);
+        txPowerInput = addInput(page, "Tx Power (dBm)", String.valueOf(savedParams.txPower),
                 InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
 
         dailySchedule = new CheckBox(this);
@@ -168,10 +150,10 @@ public class MainActivity extends Activity {
         page.addView(timeRow, timeRowParams);
         startTimeButton = timeButton(timeRow, "开始时间", startMinute);
         endTimeButton = timeButton(timeRow, "结束时间", endMinute);
-        dailySchedule.setChecked(loadedSchedule);
+        dailySchedule.setChecked(prefs.getBoolean(KEY_DAILY_ENABLED, false));
 
         toggleButton = new Button(this);
-        toggleButton.setText("停止广播");
+        toggleButton.setText("开始广播");
         toggleButton.setTextSize(15);
         toggleButton.setAllCaps(false);
         toggleButton.setTextColor(0xFFFFFFFF);
@@ -192,14 +174,34 @@ public class MainActivity extends Activity {
                 stopService(new Intent(this, BeaconScheduleService.class));
                 BeaconScheduleService.cancelNextBoundary(this);
                 autoStart = false;
-                setDirectStatus(false, "每日计划已停止");
-            } else if (advertising || broadcastStarting) {
+                updateBroadcastStatus("每日计划已停止");
+            } else if (directBroadcast != null) {
                 stopDirectBroadcast(true);
             } else {
                 autoStart = true;
                 requestPermissionAndStart();
             }
         });
+        TextWatcher parameterWatcher = new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence text, int start, int count, int after) {}
+
+            @Override
+            public void onTextChanged(CharSequence text, int start, int before, int count) {}
+
+            @Override
+            public void afterTextChanged(Editable text) {
+                try {
+                    saveParams(readParams());
+                } catch (IllegalArgumentException ignored) {
+                    // Keep the last valid parameters while an edit is incomplete or invalid.
+                }
+            }
+        };
+        uuidInput.addTextChangedListener(parameterWatcher);
+        majorInput.addTextChangedListener(parameterWatcher);
+        minorInput.addTextChangedListener(parameterWatcher);
+        txPowerInput.addTextChangedListener(parameterWatcher);
         return scroll;
     }
 
@@ -253,12 +255,13 @@ public class MainActivity extends Activity {
             }
             startTimeButton.setText(timeLabel("开始时间", startMinute));
             endTimeButton.setText(timeLabel("结束时间", endMinute));
-            saveCurrentSettings();
+            saveScheduleTimes();
             if (dailySchedule.isChecked()) startDailyScheduleService();
         }, current / 60, current % 60, true).show();
     }
 
     private void requestPermissionAndStart() {
+        if (permissionRequestPending || exactAlarmSettingsPending) return;
         ArrayList<String> needed = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             if (checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED)
@@ -282,7 +285,7 @@ public class MainActivity extends Activity {
         try {
             params = readParams();
         } catch (IllegalArgumentException exception) {
-            setDirectStatus(false, exception.getMessage());
+            updateBroadcastStatus(exception.getMessage());
             Toast.makeText(this, exception.getMessage(), Toast.LENGTH_SHORT).show();
             return;
         }
@@ -298,7 +301,6 @@ public class MainActivity extends Activity {
                     return;
                 }
             }
-            saveScheduleEnabled(true);
             startDailyScheduleService();
         } else {
             saveScheduleEnabled(false);
@@ -312,46 +314,75 @@ public class MainActivity extends Activity {
         Intent service = new Intent(this, BeaconScheduleService.class);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(service);
         else startService(service);
-        setDirectStatus(false, "每日计划已启用");
-        toggleButton.setText("停止每日计划");
+        updateBroadcastStatus("每日计划已启用");
     }
 
     private void startDirectBroadcast(BeaconParams params) {
-        if (advertising || broadcastStarting) return;
-        BluetoothManager manager = getSystemService(BluetoothManager.class);
-        BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
-        if (adapter == null || !adapter.isEnabled()) {
-            setDirectStatus(false, "请开启蓝牙");
-            return;
-        }
-        advertiser = adapter.getBluetoothLeAdvertiser();
-        if (advertiser == null) {
-            setDirectStatus(false, "此设备不支持 BLE 广播");
-            return;
-        }
-        AdvertiseSettings settings = new AdvertiseSettings.Builder()
-                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
-                .setConnectable(false)
-                .build();
-        AdvertiseData data = new AdvertiseData.Builder()
-                .addManufacturerData(APPLE_COMPANY_ID, buildPayload(params))
-                .setIncludeDeviceName(false)
-                .build();
+        if (directBroadcast != null) return;
         try {
-            broadcastRequested = true;
-            broadcastStarting = true;
-            pendingParams = params;
-            setDirectStatus(false, "正在启动广播");
-            advertiser.startAdvertising(settings, data, advertiseCallback);
+            BluetoothManager manager = getSystemService(BluetoothManager.class);
+            BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
+            if (adapter == null || !adapter.isEnabled()) {
+                updateBroadcastStatus("请开启蓝牙");
+                return;
+            }
+            BluetoothLeAdvertiser advertiser = adapter.getBluetoothLeAdvertiser();
+            if (advertiser == null) {
+                updateBroadcastStatus("此设备不支持 BLE 广播");
+                return;
+            }
+            AdvertiseSettings settings = new AdvertiseSettings.Builder()
+                    .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                    .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+                    .setConnectable(false)
+                    .build();
+            AdvertiseData data = new AdvertiseData.Builder()
+                    .addManufacturerData(APPLE_COMPANY_ID, buildPayload(params))
+                    .setIncludeDeviceName(false)
+                    .build();
+            directBroadcast = new DirectBroadcast(advertiser);
+            updateBroadcastStatus("正在启动广播");
+            advertiser.startAdvertising(settings, data, directBroadcast);
         } catch (SecurityException exception) {
-            broadcastRequested = false;
-            broadcastStarting = false;
-            setDirectStatus(false, "未获得附近设备权限");
+            clearDirectBroadcast();
+            updateBroadcastStatus("未获得附近设备权限");
         } catch (IllegalArgumentException exception) {
-            broadcastRequested = false;
-            broadcastStarting = false;
-            setDirectStatus(false, "设备不支持此广播格式");
+            clearDirectBroadcast();
+            updateBroadcastStatus("设备不支持此广播格式");
+        }
+    }
+
+    private final class DirectBroadcast extends AdvertiseCallback {
+        private final BluetoothLeAdvertiser advertiser;
+
+        DirectBroadcast(BluetoothLeAdvertiser advertiser) {
+            this.advertiser = advertiser;
+        }
+
+        @Override
+        public void onStartSuccess(AdvertiseSettings settingsInEffect) {
+            runOnUiThread(() -> {
+                if (directBroadcast == this) updateBroadcastStatus("正在广播测试信标");
+                else stop();
+            });
+        }
+
+        @Override
+        public void onStartFailure(int errorCode) {
+            runOnUiThread(() -> {
+                if (directBroadcast != this) return;
+                clearDirectBroadcast();
+                updateBroadcastStatus("广播启动失败 · 错误 " + errorCode);
+                Toast.makeText(MainActivity.this, "设备未能启动 BLE 广播", Toast.LENGTH_SHORT).show();
+            });
+        }
+
+        private void stop() {
+            try {
+                advertiser.stopAdvertising(this);
+            } catch (SecurityException ignored) {
+                // The user may revoke nearby-device access while the app is open.
+            }
         }
     }
 
@@ -379,21 +410,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void loadSettings() {
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        BeaconParams config = BeaconParams.from(prefs);
-        startMinute = prefs.getInt(KEY_START_MINUTE, DEFAULT_START_MINUTE);
-        endMinute = prefs.getInt(KEY_END_MINUTE, DEFAULT_END_MINUTE);
-        loadedSchedule = prefs.getBoolean(KEY_DAILY_ENABLED, false);
-        loadedParams = config;
-    }
-
-    private BeaconParams loadedParams;
-    private boolean loadedSchedule;
-
-    private void saveCurrentSettings() {
-        BeaconParams params = readParams();
-        saveParams(params);
+    private void saveScheduleTimes() {
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
                 .putInt(KEY_START_MINUTE, startMinute)
                 .putInt(KEY_END_MINUTE, endMinute)
@@ -426,25 +443,20 @@ public class MainActivity extends Activity {
 
     private void stopDirectBroadcast(boolean disableAutoStart) {
         if (disableAutoStart) autoStart = false;
-        broadcastRequested = false;
-        if (advertiser != null && (advertising || broadcastStarting)) {
-            try {
-                advertiser.stopAdvertising(advertiseCallback);
-            } catch (SecurityException ignored) {
-                // The user may revoke nearby-device access while the app is open.
-            }
-        }
-        broadcastStarting = false;
-        setDirectStatus(false, "广播已停止");
+        clearDirectBroadcast();
+        updateBroadcastStatus("广播已停止");
     }
 
-    private void setDirectStatus(boolean active, String status) {
-        if (statusText != null) statusText.setText(status);
-        if (toggleButton != null) {
-            boolean scheduled = dailySchedule != null && dailySchedule.isChecked();
-            toggleButton.setText(scheduled ? "停止每日计划" : active ? "停止广播" : "开始广播");
-            toggleButton.setEnabled(!broadcastStarting);
-        }
+    private void clearDirectBroadcast() {
+        DirectBroadcast broadcast = directBroadcast;
+        directBroadcast = null;
+        if (broadcast != null) broadcast.stop();
+    }
+
+    private void updateBroadcastStatus(String status) {
+        statusText.setText(status);
+        toggleButton.setText(dailySchedule.isChecked() ? "停止每日计划"
+                : directBroadcast != null ? "停止广播" : "开始广播");
     }
 
     private TextView text(String value, int size, int color, boolean bold) {
@@ -479,19 +491,18 @@ public class MainActivity extends Activity {
                 dailySchedule.setOnCheckedChangeListener((button, checked) -> onScheduleChanged(checked));
                 saveScheduleEnabled(false);
             }
-            setDirectStatus(false, "未获得所需权限");
+            updateBroadcastStatus("未获得所需权限");
         }
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQUEST_EXACT_ALARM) {
+        if (requestCode == REQUEST_EXACT_ALARM && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             exactAlarmSettingsPending = false;
             AlarmManager alarmManager = getSystemService(AlarmManager.class);
             if (alarmManager != null && alarmManager.canScheduleExactAlarms() && dailySchedule.isChecked()) {
-                saveCurrentSettings();
-                startDailyScheduleService();
+                startSelectedMode();
             } else {
                 dailySchedule.setChecked(false);
                 Toast.makeText(this, "每日计划需要允许定时提醒", Toast.LENGTH_LONG).show();
@@ -503,12 +514,11 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         if (permissionRequestPending || exactAlarmSettingsPending) return;
-        if ((dailySchedule == null || !dailySchedule.isChecked())
-                && autoStart && !advertising && !broadcastStarting && hasBroadcastPermissions()) {
+        if (!dailySchedule.isChecked() && autoStart && directBroadcast == null && hasBroadcastPermissions()) {
             try {
                 startDirectBroadcast(readParams());
             } catch (IllegalArgumentException exception) {
-                setDirectStatus(false, exception.getMessage());
+                updateBroadcastStatus(exception.getMessage());
             }
         }
     }
@@ -539,7 +549,7 @@ public class MainActivity extends Activity {
                 return;
             }
             try {
-                saveCurrentSettings();
+                readParams();
             } catch (IllegalArgumentException exception) {
                 dailySchedule.setChecked(false);
                 Toast.makeText(this, exception.getMessage(), Toast.LENGTH_SHORT).show();
@@ -574,8 +584,18 @@ public class MainActivity extends Activity {
         }
 
         static BeaconParams from(SharedPreferences prefs) {
+            String uuid = prefs.getString(KEY_UUID, DEFAULT_UUID);
+            if (!prefs.getBoolean(KEY_DEFAULT_UUID_MIGRATED, false)) {
+                SharedPreferences.Editor editor = prefs.edit().putBoolean(KEY_DEFAULT_UUID_MIGRATED, true);
+                // Older versions saved the original default when they opened the form.
+                if (PREVIOUS_DEFAULT_UUID.equalsIgnoreCase(uuid)) {
+                    uuid = DEFAULT_UUID;
+                    editor.putString(KEY_UUID, uuid);
+                }
+                editor.apply();
+            }
             return new BeaconParams(
-                    prefs.getString(KEY_UUID, DEFAULT_UUID),
+                    uuid,
                     prefs.getInt(KEY_MAJOR, DEFAULT_MAJOR),
                     prefs.getInt(KEY_MINOR, DEFAULT_MINOR),
                     prefs.getInt(KEY_TX_POWER, DEFAULT_TX_POWER));
